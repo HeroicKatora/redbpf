@@ -245,35 +245,59 @@ impl Data {
 }
 
 /// Convenience data type to exchange payload data.
+///
+/// To use values on the stack, initialize with a specific sized payload type and then use [pointer
+/// unsizing](https://doc.rust-lang.org/std/ops/trait.CoerceUnsized.html) to convert to a
+/// `MapData<T, [u8]>`. This works for all array types with `u8` elements for example.
 #[repr(C)]
-pub struct MapData<T> {
+pub struct MapData<T, Payload: ?Sized = [u8; 0]> {
     /// The custom data type to be exchanged with user space.
     pub data: T,
     offset: u32,
     size: u32,
-    payload: [u8; 0],
+    payload: Payload,
 }
 
-impl<T> MapData<T> {
-    /// Create a new `MapData` value that includes only `data` and no packet
-    /// payload.
-    pub fn new(&self, data: T) -> Self {
-        MapData::<T>::with_payload(data, 0, 0)
+impl<T, Payload: ?Sized> MapData<T, Payload> {
+    pub fn new(data: T) -> Self
+    where
+        Payload: Default,
+    {
+        MapData {
+            data,
+            offset: 0,
+            size: 0,
+            payload: Payload::default(),
+        }
+    }
+
+    pub fn new_with_payload(data: T, payload: Payload) -> Self
+    where
+        Payload: Sized
+    {
+        MapData {
+            data,
+            offset: 0,
+            size: 0,
+            payload,
+        }
     }
 
     /// Create a new `MapData` value that includes `data` and `size` payload
     /// bytes, where the interesting part of the payload starts at `offset`.
     ///
     /// The payload can then be retrieved calling `MapData::payload()`.
-    pub fn with_payload(data: T, offset: u32, size: u32) -> Self {
-        Self {
-            data,
-            payload: [],
-            offset,
-            size
-        }
+    /// # Safety
+    /// The caller must guarantee that `size` additional bytes after the `MapData` are within the
+    /// same allocation and not currently aliased.
+    pub unsafe fn set_payload_unchecked(&mut self, offset: u32, size: u32) {
+        assert!(offset <= size, "Payload size must not exceed offset");
+        self.offset = offset;
+        self.size = size;
     }
+}
 
+impl<T> MapData<T, [u8]> {
     /// Return the payload if any, skipping the initial `offset` bytes.
     pub fn payload(&self) -> &[u8] {
         unsafe {
@@ -304,7 +328,7 @@ impl<T> PerfMap<T> {
     /// `packet_size` specifies the number of bytes from the current packet that
     /// the kernel should append to the event data.
     #[inline]
-    pub fn insert(&mut self, ctx: &XdpContext, data: MapData<T>) {
+    pub fn insert(&mut self, ctx: &XdpContext, data: &mut MapData<T>) {
         let size = data.size;
         self.0
             .insert_with_flags(ctx.inner(), data, PerfMapFlags::with_xdp_size(size))
@@ -313,7 +337,7 @@ impl<T> PerfMap<T> {
     /// Insert a new event in the perf events array keyed by the index and with
     /// the additional xdp payload data specified in the given `PerfMapFlags`.
     #[inline]
-    pub fn insert_with_flags(&mut self, ctx: &XdpContext, data: MapData<T>, mut flags: PerfMapFlags) {
+    pub fn insert_with_flags(&mut self, ctx: &XdpContext, data: &mut MapData<T>, mut flags: PerfMapFlags) {
         flags.xdp_size = data.size;
         self.0.insert_with_flags(ctx.inner(), data, flags)
     }
